@@ -3,16 +3,18 @@ package storage
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"time"
 
 	"github.com/distribution/distribution/v3"
-	dcontext "github.com/distribution/distribution/v3/context"
-	"github.com/distribution/distribution/v3/reference"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/distribution/distribution/v3/registry/storage/driver"
-	"github.com/distribution/distribution/v3/uuid"
+	"github.com/distribution/reference"
+	"github.com/google/uuid"
 	"github.com/opencontainers/go-digest"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // linkPathFunc describes a function that can resolve a link based on the
@@ -32,13 +34,11 @@ type linkedBlobStore struct {
 	deleteEnabled          bool
 	resumableDigestEnabled bool
 
-	// linkPathFns specifies one or more path functions allowing one to
-	// control the repository blob link set to which the blob store
-	// dispatches. This is required because manifest and layer blobs have not
-	// yet been fully merged. At some point, this functionality should be
-	// removed the blob links folder should be merged. The first entry is
-	// treated as the "canonical" link location and will be used for writes.
-	linkPathFns []linkPathFunc
+	// linkPath allows one to control the repository blob link set to which
+	// the blob store dispatches. This is required because manifest and layer
+	// blobs have not yet been fully merged. At some point, this functionality
+	// should be removed and the blob links folder should be merged.
+	linkPath linkPathFunc
 
 	// linkDirectoryPathSpec locates the root directories in which one might find links
 	linkDirectoryPathSpec pathSpec
@@ -46,7 +46,7 @@ type linkedBlobStore struct {
 
 var _ distribution.BlobStore = &linkedBlobStore{}
 
-func (lbs *linkedBlobStore) Stat(ctx context.Context, dgst digest.Digest) (distribution.Descriptor, error) {
+func (lbs *linkedBlobStore) Stat(ctx context.Context, dgst digest.Digest) (v1.Descriptor, error) {
 	return lbs.blobAccessController.Stat(ctx, dgst)
 }
 
@@ -59,7 +59,7 @@ func (lbs *linkedBlobStore) Get(ctx context.Context, dgst digest.Digest) ([]byte
 	return lbs.blobStore.Get(ctx, canonical.Digest)
 }
 
-func (lbs *linkedBlobStore) Open(ctx context.Context, dgst digest.Digest) (distribution.ReadSeekCloser, error) {
+func (lbs *linkedBlobStore) Open(ctx context.Context, dgst digest.Digest) (io.ReadSeekCloser, error) {
 	canonical, err := lbs.Stat(ctx, dgst) // access check
 	if err != nil {
 		return nil, err
@@ -82,17 +82,17 @@ func (lbs *linkedBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter
 	return lbs.blobServer.ServeBlob(ctx, w, r, canonical.Digest)
 }
 
-func (lbs *linkedBlobStore) Put(ctx context.Context, mediaType string, p []byte) (distribution.Descriptor, error) {
+func (lbs *linkedBlobStore) Put(ctx context.Context, mediaType string, p []byte) (v1.Descriptor, error) {
 	dgst := digest.FromBytes(p)
 	// Place the data in the blob store first.
 	desc, err := lbs.blobStore.Put(ctx, mediaType, p)
 	if err != nil {
 		dcontext.GetLogger(ctx).Errorf("error putting into main store: %v", err)
-		return distribution.Descriptor{}, err
+		return v1.Descriptor{}, err
 	}
 
 	if err := lbs.blobAccessController.SetDescriptor(ctx, dgst, desc); err != nil {
-		return distribution.Descriptor{}, err
+		return v1.Descriptor{}, err
 	}
 
 	// TODO(stevvooe): Write out mediatype if incoming differs from what is
@@ -124,9 +124,9 @@ func WithMountFrom(ref reference.Canonical) distribution.BlobCreateOption {
 	})
 }
 
-// Writer begins a blob write session, returning a handle.
+// Create begins a blob write session, returning a handle.
 func (lbs *linkedBlobStore) Create(ctx context.Context, options ...distribution.BlobCreateOption) (distribution.BlobWriter, error) {
-	dcontext.GetLogger(ctx).Debug("(*linkedBlobStore).Writer")
+	dcontext.GetLogger(ctx).Debug("(*linkedBlobStore).Create")
 
 	var opts distribution.CreateOptions
 
@@ -145,14 +145,13 @@ func (lbs *linkedBlobStore) Create(ctx context.Context, options ...distribution.
 		}
 	}
 
-	uuid := uuid.Generate().String()
+	uuid := uuid.NewString()
 	startedAt := time.Now().UTC()
 
 	path, err := pathFor(uploadDataPathSpec{
 		name: lbs.repository.Named().Name(),
 		id:   uuid,
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +160,6 @@ func (lbs *linkedBlobStore) Create(ctx context.Context, options ...distribution.
 		name: lbs.repository.Named().Name(),
 		id:   uuid,
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +179,6 @@ func (lbs *linkedBlobStore) Resume(ctx context.Context, id string) (distribution
 		name: lbs.repository.Named().Name(),
 		id:   id,
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +202,6 @@ func (lbs *linkedBlobStore) Resume(ctx context.Context, id string) (distribution
 		name: lbs.repository.Named().Name(),
 		id:   id,
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -275,24 +271,24 @@ func (lbs *linkedBlobStore) Enumerate(ctx context.Context, ingestor func(digest.
 	})
 }
 
-func (lbs *linkedBlobStore) mount(ctx context.Context, sourceRepo reference.Named, dgst digest.Digest, sourceStat *distribution.Descriptor) (distribution.Descriptor, error) {
-	var stat distribution.Descriptor
+func (lbs *linkedBlobStore) mount(ctx context.Context, sourceRepo reference.Named, dgst digest.Digest, sourceStat *v1.Descriptor) (v1.Descriptor, error) {
+	var stat v1.Descriptor
 	if sourceStat == nil {
 		// look up the blob info from the sourceRepo if not already provided
 		repo, err := lbs.registry.Repository(ctx, sourceRepo)
 		if err != nil {
-			return distribution.Descriptor{}, err
+			return v1.Descriptor{}, err
 		}
 		stat, err = repo.Blobs(ctx).Stat(ctx, dgst)
 		if err != nil {
-			return distribution.Descriptor{}, err
+			return v1.Descriptor{}, err
 		}
 	} else {
 		// use the provided blob info
 		stat = *sourceStat
 	}
 
-	desc := distribution.Descriptor{
+	desc := v1.Descriptor{
 		Size: stat.Size,
 
 		// NOTE(stevvooe): The central blob store firewalls media types from
@@ -328,7 +324,7 @@ func (lbs *linkedBlobStore) newBlobUpload(ctx context.Context, uuid, path string
 
 // linkBlob links a valid, written blob into the registry under the named
 // repository for the upload controller.
-func (lbs *linkedBlobStore) linkBlob(ctx context.Context, canonical distribution.Descriptor, aliases ...digest.Digest) error {
+func (lbs *linkedBlobStore) linkBlob(ctx context.Context, canonical v1.Descriptor, aliases ...digest.Digest) error {
 	dgsts := append([]digest.Digest{canonical.Digest}, aliases...)
 
 	// TODO(stevvooe): Need to write out mediatype for only canonical hash
@@ -338,16 +334,13 @@ func (lbs *linkedBlobStore) linkBlob(ctx context.Context, canonical distribution
 	// Don't make duplicate links.
 	seenDigests := make(map[digest.Digest]struct{}, len(dgsts))
 
-	// only use the first link
-	linkPathFn := lbs.linkPathFns[0]
-
 	for _, dgst := range dgsts {
 		if _, seen := seenDigests[dgst]; seen {
 			continue
 		}
 		seenDigests[dgst] = struct{}{}
 
-		blobLinkPath, err := linkPathFn(lbs.repository.Named().Name(), dgst)
+		blobLinkPath, err := lbs.linkPath(lbs.repository.Named().Name(), dgst)
 		if err != nil {
 			return err
 		}
@@ -364,44 +357,29 @@ type linkedBlobStatter struct {
 	*blobStore
 	repository distribution.Repository
 
-	// linkPathFns specifies one or more path functions allowing one to
-	// control the repository blob link set to which the blob store
-	// dispatches. This is required because manifest and layer blobs have not
-	// yet been fully merged. At some point, this functionality should be
-	// removed an the blob links folder should be merged. The first entry is
-	// treated as the "canonical" link location and will be used for writes.
-	linkPathFns []linkPathFunc
+	// linkPath allows one to control the repository blob link set to which
+	// the blob store dispatches. This is required because manifest and layer
+	// blobs have not yet been fully merged. At some point, this functionality
+	// should be removed an the blob links folder should be merged.
+	linkPath linkPathFunc
 }
 
 var _ distribution.BlobDescriptorService = &linkedBlobStatter{}
 
-func (lbs *linkedBlobStatter) Stat(ctx context.Context, dgst digest.Digest) (distribution.Descriptor, error) {
-	var (
-		found  bool
-		target digest.Digest
-	)
-
-	// try the many link path functions until we get success or an error that
-	// is not PathNotFoundError.
-	for _, linkPathFn := range lbs.linkPathFns {
-		var err error
-		target, err = lbs.resolveWithLinkFunc(ctx, dgst, linkPathFn)
-
-		if err == nil {
-			found = true
-			break // success!
-		}
-
-		switch err := err.(type) {
-		case driver.PathNotFoundError:
-			// do nothing, just move to the next linkPathFn
-		default:
-			return distribution.Descriptor{}, err
-		}
+func (lbs *linkedBlobStatter) Stat(ctx context.Context, dgst digest.Digest) (v1.Descriptor, error) {
+	blobLinkPath, err := lbs.linkPath(lbs.repository.Named().Name(), dgst)
+	if err != nil {
+		return v1.Descriptor{}, err
 	}
 
-	if !found {
-		return distribution.Descriptor{}, distribution.ErrBlobUnknown
+	target, err := lbs.blobStore.readlink(ctx, blobLinkPath)
+	if err != nil {
+		switch err := err.(type) {
+		case driver.PathNotFoundError:
+			return v1.Descriptor{}, distribution.ErrBlobUnknown
+		default:
+			return v1.Descriptor{}, err
+		}
 	}
 
 	if target != dgst {
@@ -416,40 +394,15 @@ func (lbs *linkedBlobStatter) Stat(ctx context.Context, dgst digest.Digest) (dis
 }
 
 func (lbs *linkedBlobStatter) Clear(ctx context.Context, dgst digest.Digest) (err error) {
-	// clear any possible existence of a link described in linkPathFns
-	for _, linkPathFn := range lbs.linkPathFns {
-		blobLinkPath, err := linkPathFn(lbs.repository.Named().Name(), dgst)
-		if err != nil {
-			return err
-		}
-
-		err = lbs.blobStore.driver.Delete(ctx, blobLinkPath)
-		if err != nil {
-			switch err := err.(type) {
-			case driver.PathNotFoundError:
-				continue // just ignore this error and continue
-			default:
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// resolveTargetWithFunc allows us to read a link to a resource with different
-// linkPathFuncs to let us try a few different paths before returning not
-// found.
-func (lbs *linkedBlobStatter) resolveWithLinkFunc(ctx context.Context, dgst digest.Digest, linkPathFn linkPathFunc) (digest.Digest, error) {
-	blobLinkPath, err := linkPathFn(lbs.repository.Named().Name(), dgst)
+	blobLinkPath, err := lbs.linkPath(lbs.repository.Named().Name(), dgst)
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	return lbs.blobStore.readlink(ctx, blobLinkPath)
+	return lbs.blobStore.driver.Delete(ctx, blobLinkPath)
 }
 
-func (lbs *linkedBlobStatter) SetDescriptor(ctx context.Context, dgst digest.Digest, desc distribution.Descriptor) error {
+func (lbs *linkedBlobStatter) SetDescriptor(ctx context.Context, dgst digest.Digest, desc v1.Descriptor) error {
 	// The canonical descriptor for a blob is set at the commit phase of upload
 	return nil
 }
