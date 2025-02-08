@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/distribution/distribution/v3/context"
-	"github.com/distribution/distribution/v3/reference"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
+	"github.com/distribution/reference"
 )
 
 func testRefs(t *testing.T) (reference.Reference, reference.Reference, reference.Reference) {
@@ -40,10 +40,10 @@ func TestSchedule(t *testing.T) {
 	}
 
 	var mu sync.Mutex
-	s := New(context.Background(), inmemory.New(), "/ttl")
+	s := New(dcontext.Background(), inmemory.New(), "/ttl")
 	deleteFunc := func(repoName reference.Reference) error {
 		if len(remainingRepos) == 0 {
-			t.Fatalf("Incorrect expiry count")
+			t.Fatal("Incorrect expiry count")
 		}
 		_, ok := remainingRepos[repoName.String()]
 		if !ok {
@@ -69,7 +69,6 @@ func TestSchedule(t *testing.T) {
 		s.Lock()
 		s.add(ref3, 1*timeUnit, entryTypeBlob)
 		s.Unlock()
-
 	}()
 
 	// Ensure all repos are deleted
@@ -124,20 +123,25 @@ func TestRestoreOld(t *testing.T) {
 		t.Fatalf("Error serializing test data: %s", err.Error())
 	}
 
-	ctx := context.Background()
+	ctx := dcontext.Background()
 	pathToStatFile := "/ttl"
 	fs := inmemory.New()
 	err = fs.PutContent(ctx, pathToStatFile, serialized)
 	if err != nil {
 		t.Fatal("Unable to write serialized data to fs")
 	}
-	s := New(context.Background(), fs, "/ttl")
+	s := New(dcontext.Background(), fs, "/ttl")
 	s.OnBlobExpire(deleteFunc)
 	err = s.Start()
 	if err != nil {
 		t.Fatalf("Error starting ttlExpirationScheduler: %s", err)
 	}
-	defer s.Stop()
+	defer func(s *TTLExpirationScheduler) {
+		err := s.Stop()
+		if err != nil {
+			t.Fatalf("Error stopping ttlExpirationScheduler: %s", err)
+		}
+	}(s)
 
 	wg.Wait()
 	mu.Lock()
@@ -166,23 +170,26 @@ func TestStopRestore(t *testing.T) {
 
 	fs := inmemory.New()
 	pathToStateFile := "/ttl"
-	s := New(context.Background(), fs, pathToStateFile)
+	s := New(dcontext.Background(), fs, pathToStateFile)
 	s.onBlobExpire = deleteFunc
 
 	err := s.Start()
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err)
 	}
 	s.add(ref1, 300*timeUnit, entryTypeBlob)
 	s.add(ref2, 100*timeUnit, entryTypeBlob)
 
 	// Start and stop before all operations complete
 	// state will be written to fs
-	s.Stop()
+	err = s.Stop()
+	if err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(10 * time.Millisecond)
 
 	// v2 will restore state from fs
-	s2 := New(context.Background(), fs, pathToStateFile)
+	s2 := New(dcontext.Background(), fs, pathToStateFile)
 	s2.onBlobExpire = deleteFunc
 	err = s2.Start()
 	if err != nil {
@@ -195,17 +202,16 @@ func TestStopRestore(t *testing.T) {
 	if len(remainingRepos) != 0 {
 		t.Fatalf("Repositories remaining: %#v", remainingRepos)
 	}
-
 }
 
 func TestDoubleStart(t *testing.T) {
-	s := New(context.Background(), inmemory.New(), "/ttl")
+	s := New(dcontext.Background(), inmemory.New(), "/ttl")
 	err := s.Start()
 	if err != nil {
-		t.Fatalf("Unable to start scheduler")
+		t.Fatal("Unable to start scheduler")
 	}
 	err = s.Start()
 	if err == nil {
-		t.Fatalf("Scheduler started twice without error")
+		t.Fatal("Scheduler started twice without error")
 	}
 }

@@ -11,40 +11,25 @@ import (
 )
 
 type mockBlobService struct {
-	descriptors map[digest.Digest]distribution.Descriptor
+	descriptors map[digest.Digest]v1.Descriptor
+	distribution.BlobService
 }
 
-func (bs *mockBlobService) Stat(ctx context.Context, dgst digest.Digest) (distribution.Descriptor, error) {
+func (bs *mockBlobService) Stat(ctx context.Context, dgst digest.Digest) (v1.Descriptor, error) {
 	if descriptor, ok := bs.descriptors[dgst]; ok {
 		return descriptor, nil
 	}
-	return distribution.Descriptor{}, distribution.ErrBlobUnknown
+	return v1.Descriptor{}, distribution.ErrBlobUnknown
 }
 
-func (bs *mockBlobService) Get(ctx context.Context, dgst digest.Digest) ([]byte, error) {
-	panic("not implemented")
-}
-
-func (bs *mockBlobService) Open(ctx context.Context, dgst digest.Digest) (distribution.ReadSeekCloser, error) {
-	panic("not implemented")
-}
-
-func (bs *mockBlobService) Put(ctx context.Context, mediaType string, p []byte) (distribution.Descriptor, error) {
-	d := distribution.Descriptor{
+func (bs *mockBlobService) Put(ctx context.Context, mediaType string, p []byte) (v1.Descriptor, error) {
+	d := v1.Descriptor{
 		Digest:    digest.FromBytes(p),
 		Size:      int64(len(p)),
 		MediaType: "application/octet-stream",
 	}
 	bs.descriptors[d.Digest] = d
 	return d, nil
-}
-
-func (bs *mockBlobService) Create(ctx context.Context, options ...distribution.BlobCreateOption) (distribution.BlobWriter, error) {
-	panic("not implemented")
-}
-
-func (bs *mockBlobService) Resume(ctx context.Context, id string) (distribution.BlobWriter, error) {
-	panic("not implemented")
 }
 
 func TestBuilder(t *testing.T) {
@@ -105,27 +90,27 @@ func TestBuilder(t *testing.T) {
 }`)
 	configDigest := digest.FromBytes(imgJSON)
 
-	descriptors := []distribution.Descriptor{
+	descriptors := []v1.Descriptor{
 		{
+			MediaType:   v1.MediaTypeImageLayerGzip,
 			Digest:      digest.Digest("sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4"),
 			Size:        5312,
-			MediaType:   v1.MediaTypeImageLayerGzip,
 			Annotations: map[string]string{"apple": "orange", "lettuce": "wrap"},
 		},
 		{
+			MediaType: v1.MediaTypeImageLayerGzip,
 			Digest:    digest.Digest("sha256:86e0e091d0da6bde2456dbb48306f3956bbeb2eae1b5b9a43045843f69fe4aaa"),
 			Size:      235231,
-			MediaType: v1.MediaTypeImageLayerGzip,
 		},
 		{
+			MediaType: v1.MediaTypeImageLayerGzip,
 			Digest:    digest.Digest("sha256:b4ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4"),
 			Size:      639152,
-			MediaType: v1.MediaTypeImageLayerGzip,
 		},
 	}
 	annotations := map[string]string{"hot": "potato"}
 
-	bs := &mockBlobService{descriptors: make(map[digest.Digest]distribution.Descriptor)}
+	bs := &mockBlobService{descriptors: make(map[digest.Digest]v1.Descriptor)}
 	builder := NewManifestBuilder(bs, imgJSON, annotations)
 
 	for _, d := range descriptors {
@@ -166,7 +151,7 @@ func TestBuilder(t *testing.T) {
 	}
 
 	references := manifest.References()
-	expected := append([]distribution.Descriptor{manifest.Target()}, descriptors...)
+	expected := append([]v1.Descriptor{manifest.Target()}, descriptors...)
 	if !reflect.DeepEqual(references, expected) {
 		t.Fatal("References() does not match the descriptors added")
 	}
